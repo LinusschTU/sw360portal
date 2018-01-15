@@ -13,15 +13,18 @@
 
 package org.eclipse.sw360.licenseinfo.outputGenerators;
 
+import org.apache.log4j.Logger;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.XWPFRun;
+import org.apache.thrift.TException;
 import org.apache.xmlbeans.XmlException;
 import org.eclipse.sw360.datahandler.thrift.SW360Exception;
-import org.eclipse.sw360.datahandler.thrift.licenseinfo.LicenseInfo;
-import org.eclipse.sw360.datahandler.thrift.licenseinfo.LicenseInfoParsingResult;
-import org.eclipse.sw360.datahandler.thrift.licenseinfo.LicenseInfoRequestStatus;
-import org.eclipse.sw360.datahandler.thrift.licenseinfo.LicenseNameWithText;
+import org.eclipse.sw360.datahandler.thrift.ThriftClients;
+import org.eclipse.sw360.datahandler.thrift.licenseinfo.*;
+import org.eclipse.sw360.datahandler.thrift.licenses.License;
+import org.eclipse.sw360.datahandler.thrift.licenses.LicenseService;
+import org.eclipse.sw360.datahandler.thrift.licenses.Todo;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -32,37 +35,55 @@ import static org.eclipse.sw360.licenseinfo.outputGenerators.DocxUtils.*;
 
 public class DocxGenerator extends OutputGenerator<byte[]> {
 
+    private static final Logger LOGGER = Logger.getLogger(DocxGenerator.class);
+
     private static final String UNKNOWN_LICENSE_NAME = "Unknown license name";
     private static final String UNKNOWN_FILE_NAME = "Unknown file name";
+    private static final String TODO_DEFAULT_TEXT = "todo not determined so far.";
 
-    public DocxGenerator() {
-        super("docx", "License information as DOCX", true, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    private static final String DOCX_TEMPLATE_FILE = "/templateFrontpageContent.docx";
+    private static final String DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    private static final String DOCX_OUTPUT_TYPE = "docx";
+
+    public DocxGenerator(OutputFormatVariant outputFormatVariant, String description) {
+        super(DOCX_OUTPUT_TYPE, description, true, DOCX_MIME_TYPE, outputFormatVariant);
     }
 
     @Override
     public byte[] generateOutputFile(Collection<LicenseInfoParsingResult> projectLicenseInfoResults, String projectName, String projectVersion, String licenseInfoHeaderText) throws SW360Exception {
+        ByteArrayOutputStream docxOutputStream = new ByteArrayOutputStream();
+
         try {
-            XWPFDocument document = new XWPFDocument(this.getClass().getResourceAsStream("/templateFrontpageContent.docx"));
-            fillDocument(document, projectLicenseInfoResults, projectName, projectVersion, licenseInfoHeaderText);
-            ByteArrayOutputStream docxOutputStream = new ByteArrayOutputStream();
-            document.write(docxOutputStream);
+            XWPFDocument xwpfDocument = new XWPFDocument(this.getClass().getResourceAsStream(DOCX_TEMPLATE_FILE));
+            switch (getOutputVariant()) {
+                case DISCLOSURE:
+                    fillDocument(xwpfDocument, projectLicenseInfoResults, projectName, projectVersion, licenseInfoHeaderText, false);
+                    break;
+                case REPORT:
+                    fillDocument(xwpfDocument, projectLicenseInfoResults, projectName, projectVersion, licenseInfoHeaderText, true);
+                    break;
+                default:
+                    throw new IllegalArgumentException("Unknown generator variant type: " + getOutputVariant());
+            }
+
+            xwpfDocument.write(docxOutputStream);
             docxOutputStream.close();
-            return docxOutputStream.toByteArray();
         } catch (XmlException e) {
             throw new SW360Exception("Got XmlException while generating docx document: " + e.getMessage());
         } catch (IOException ioe) {
             throw new SW360Exception("Got IOException when generating docx document: " + ioe.getMessage());
         }
+
+        return docxOutputStream.toByteArray();
     }
 
     private void fillDocument(XWPFDocument document, Collection<LicenseInfoParsingResult> projectLicenseInfoResults,
-                              String projectName, String projectVersion, String licenseInfoHeaderText) throws XmlException {
+                              String projectName, String projectVersion, String licenseInfoHeaderText, boolean todos) throws XmlException {
         replaceText(document, "$license-info-header", licenseInfoHeaderText);
         replaceText(document, "$project-name", projectName);
         replaceText(document, "$project-version", projectVersion);
-
         fillReleaseBulletList(document, projectLicenseInfoResults);
-        fillReleaseDetailList(document, projectLicenseInfoResults);
+        fillReleaseDetailList(document, projectLicenseInfoResults, todos);
         fillLicenseList(document, projectLicenseInfoResults);
     }
 
@@ -75,32 +96,22 @@ public class DocxGenerator extends OutputGenerator<byte[]> {
         addPageBreak(document);
     }
 
-    private void fillReleaseDetailList(XWPFDocument document, Collection<LicenseInfoParsingResult> projectLicenseInfoResults) {
-        XWPFRun releaseTitleTextRun = document.createParagraph().createRun();
-        addFormattedText(releaseTitleTextRun, "Detailed Releases Information", FONT_SIZE + 2, true);
-        XWPFRun releaseInfoTextRun = document.createParagraph().createRun();
-        setText(releaseInfoTextRun, "Please note the following license conditions and copyright " +
+    private void fillReleaseDetailList(XWPFDocument document, Collection<LicenseInfoParsingResult> projectLicenseInfoResults, boolean todos) {
+        addFormattedText(document.createParagraph().createRun(), "Detailed Releases Information", FONT_SIZE + 2, true);
+        setText(document.createParagraph().createRun(), "Please note the following license conditions and copyright " +
                 "notices applicable to Open Source Software and/or other components (or parts thereof):");
         addNewLines(document, 0);
+
+        List<License> sw360Licenses = new ArrayList<>();
+        if (todos) {
+            sw360Licenses = getLicenses();
+        }
 
         for (LicenseInfoParsingResult parsingResult : projectLicenseInfoResults) {
             addReleaseTitle(document, parsingResult);
             if (parsingResult.getStatus() == LicenseInfoRequestStatus.SUCCESS) {
-                XWPFRun copyrightTitleRun = document.createParagraph().createRun();
-                addFormattedText(copyrightTitleRun, "Copyrights", FONT_SIZE, true);
-                for (String copyright : getReleaseCopyrights(parsingResult)) {
-                    XWPFParagraph copyPara = document.createParagraph();
-                    copyPara.setSpacingAfter(0);
-                    setText(copyPara.createRun(), copyright);
-                }
-                XWPFRun licensesTitleRun = document.createParagraph().createRun();
-                addNewLines(licensesTitleRun, 1);
-                addFormattedText(licensesTitleRun, "Licenses", FONT_SIZE, true);
-                for (String licenseName : getReleasesLicenses(parsingResult)) {
-                    XWPFParagraph licensePara = document.createParagraph();
-                    licensePara.setSpacingAfter(0);
-                    addBookmarkHyperLink(licensePara, licenseName, licenseName);
-                }
+                addCopyrights(document, parsingResult);
+                addLicenses(document, parsingResult, sw360Licenses);
             } else {
                 XWPFRun errorRun = document.createParagraph().createRun();
                 String errorText = nullToEmptyString(parsingResult.getMessage());
@@ -119,6 +130,44 @@ public class DocxGenerator extends OutputGenerator<byte[]> {
         releaseTitleParagraph.setStyle(STYLE_HEADING);
         addBookmark(releaseTitleParagraph, releaseTitle, releaseTitle);
         addNewLines(document, 0);
+    }
+
+    private void addCopyrights(XWPFDocument document, LicenseInfoParsingResult parsingResult) {
+        XWPFRun copyrightTitleRun = document.createParagraph().createRun();
+        addFormattedText(copyrightTitleRun, "Copyrights", FONT_SIZE, true);
+        for (String copyright : getReleaseCopyrights(parsingResult)) {
+            XWPFParagraph copyPara = document.createParagraph();
+            copyPara.setSpacingAfter(0);
+            setText(copyPara.createRun(), copyright);
+        }
+    }
+
+    private void addLicenses(XWPFDocument document, LicenseInfoParsingResult parsingResult, List<License> sw360Licenes) {
+        XWPFRun licensesTitleRun = document.createParagraph().createRun();
+        addNewLines(licensesTitleRun, 1);
+        addFormattedText(licensesTitleRun, "Licenses", FONT_SIZE, true);
+        for (String licenseName : getReleasesLicenses(parsingResult)) {
+            XWPFParagraph licensePara = document.createParagraph();
+            licensePara.setSpacingAfter(0);
+            addBookmarkHyperLink(licensePara, licenseName, licenseName);
+            addTodos(document, licenseName, sw360Licenes);
+        }
+    }
+
+    private void addTodos(XWPFDocument document, String spdxLicense, List<License> sw360Licenses) {
+        if (sw360Licenses != null && !sw360Licenses.isEmpty()) {
+            XWPFRun todoTitleRun = document.createParagraph().createRun();
+            addNewLines(todoTitleRun, 0);
+            Set<String> todos = getTodosFromLicenses(spdxLicense, sw360Licenses);
+            addFormattedText(todoTitleRun, "Todos for license " + spdxLicense + ":", FONT_SIZE, true);
+            for (String todo : todos) {
+                XWPFParagraph copyPara = document.createParagraph();
+                copyPara.setSpacingAfter(0);
+                XWPFRun todoRun = copyPara.createRun();
+                setText(todoRun, todo);
+                addNewLines(todoRun, 1);
+            }
+        }
     }
 
     private Set<String> getReleaseCopyrights(LicenseInfoParsingResult licenseInfoParsingResult) {
@@ -154,6 +203,33 @@ public class DocxGenerator extends OutputGenerator<byte[]> {
                 .orElse(UNKNOWN_FILE_NAME);
     }
 
+    private static Set<String> getTodosFromLicenses(String spdxLicense, List<License> licenses) {
+        Set<String> todos = new HashSet<>();
+        if (!spdxLicense.isEmpty() && !Objects.isNull(licenses)) {
+            for (License license : licenses) {
+                if (spdxLicense.equalsIgnoreCase(license.getId())) {
+                    for (Todo todo : license.getTodos()) {
+                        todos.add(todo.getText());
+                    }
+                }
+            }
+            if (todos.isEmpty()) {
+                todos.add(TODO_DEFAULT_TEXT);
+            }
+        }
+        return todos;
+    }
+
+    private static List<License> getLicenses() {
+        LicenseService.Iface licenseClient = new ThriftClients().makeLicenseClient();
+        try {
+            return licenseClient.getLicenses();
+        } catch (TException e) {
+            LOGGER.error("Could not get license: " + e.getMessage(), e);
+            return null;
+        }
+    }
+
     private void fillLicenseList(XWPFDocument document, Collection<LicenseInfoParsingResult> projectLicenseInfoResults) {
         List<LicenseNameWithText> licenseNameWithTexts = OutputGenerator.getSortedLicenseNameWithTexts(projectLicenseInfoResults);
         XWPFRun licenseHeaderRun = document.createParagraph().createRun();
@@ -165,6 +241,7 @@ public class DocxGenerator extends OutputGenerator<byte[]> {
             licenseParagraph.setStyle(STYLE_HEADING);
             String licenseName = licenseNameWithText.isSetLicenseName() ? licenseNameWithText.getLicenseName() : UNKNOWN_LICENSE_NAME;
             addBookmark(licenseParagraph, licenseName, licenseName);
+            addNewLines(document, 0);
             setText(document.createParagraph().createRun(), nullToEmptyString(licenseNameWithText.getLicenseText()));
             addNewLines(document, 1);
         }
