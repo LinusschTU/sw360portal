@@ -1,5 +1,5 @@
 <%--
-  ~ Copyright Siemens AG, 2013-2017. Part of the SW360 Portal Project.
+  ~ Copyright Siemens AG, 2013-2018. Part of the SW360 Portal Project.
   ~
   ~ SPDX-License-Identifier: EPL-1.0
   ~
@@ -121,10 +121,16 @@
 
             $('#releaseSearchResultsTable').find(':checked').each(
                 function () {
-                    releaseIds.push(this.value);
+                    if(this.value!='${release.id}'){
+                        releaseIds.push(this.value);
+                    }else{
+                        $('#tab-ReleaseLinks').append('<div class="alert"> You cannot link a Release to itself! </div>');
+                    }
                 }
             );
-            addReleaseInfo(releaseIds);
+            if(releaseIds.length>0){
+                addReleaseInfo(releaseIds);
+            }
 
             closeOpenDialogs();
             return false;
